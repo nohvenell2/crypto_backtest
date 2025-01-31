@@ -42,7 +42,7 @@ class Backtest:
         self.backtest_id = backtest_id
         self.market_name = market_name
         self.portfolio = {}
-        self.transaction_list = []
+        self.transaction_log = []
         self.initial_balance = initial_balance  # 초기 자본 저장
         self.trades_count = 0  # 거래 횟수 추적
         self.save_db = save_db # db 저장 여부
@@ -98,7 +98,7 @@ class Backtest:
             'total_value': total_value,
             'return': return_value
         } 
-        self.transaction_list.append(transaction_info)
+        self.transaction_log.append(transaction_info)
         # db 저장        
         if self.save_db:
             log_transaction(
@@ -168,7 +168,7 @@ class Backtest:
             'total_value': total_value,
             'return': return_value
         }
-        self.transaction_list.append(transaction_info)
+        self.transaction_log.append(transaction_info)
         # db 저장
         if self.save_db:
             log_transaction(
@@ -192,6 +192,22 @@ class Backtest:
             return self.portfolio[crypto_name]
         
     def get_asset_value(self, timestamp: datetime, price_type: Literal['daily', '1hour'] = '1hour') -> float:
+        """특정 시점 보유 암호화폐 총 가치 계산
+        
+        Args:
+            timestamp: 가치 계산 시점
+            price_type: 가격 데이터 타입 ('daily' 또는 '1hour')
+            
+        Returns:
+            float: 암호화폐 가치 
+        """
+        total_asset_value = sum(
+            amount * get_price(crypto_name, timestamp, price_type) 
+            for crypto_name, amount in self.portfolio.items()
+        )
+        return total_asset_value
+    
+    def get_portfolio_value(self, timestamp: datetime, price_type: Literal['daily', '1hour'] = '1hour') -> float:
         """특정 시점 포트폴리오 총 가치 계산
         
         Args:
@@ -201,11 +217,8 @@ class Backtest:
         Returns:
             float: 포트폴리오 총 가치 (현금 + 자산)
         """
-        total_asset_value = sum(
-            amount * get_price(crypto_name, timestamp, price_type) 
-            for crypto_name, amount in self.portfolio.items()
-        )
-        return total_asset_value
+        total_value = self.cash_balance + self.get_asset_value(timestamp, price_type)
+        return total_value
 
 if __name__ == '__main__':
     strategy = Backtest(backtest_id='test', market_name='upbit')

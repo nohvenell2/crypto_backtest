@@ -22,14 +22,14 @@ from datetime import datetime
 from backtest_strategy import BacktestStrategy
 
 # 전략 인스턴스 생성
-strategy = BacktestStrategy(
+backtest = Backtest(
     backtest_id='test_001',
     market_name='upbit',
     initial_balance=10000000.0
 )
 
 # 매수 실행
-strategy.buy(
+backtest.buy(
     date=datetime.now(),
     crypto_name='KRW-BTC',
     price=50000000.0,
@@ -39,14 +39,14 @@ strategy.buy(
 )
 
 # 포트폴리오 가치 조회
-portfolio_value = strategy.get_portfolio_value(datetime.now())
+portfolio_value = backtest.get_portfolio_value(datetime.now())
 ```
 
 ### 주요 기능
 
 #### 매수 (buy)
 ```python
-strategy.buy(
+backtest.buy(
     date=datetime.now(),
     crypto_name='KRW-BTC',
     price=50000000.0,
@@ -64,7 +64,7 @@ strategy.buy(
 
 #### 매도 (sell)
 ```python
-strategy.sell(
+backtest.sell(
     date=datetime.now(),
     crypto_name='KRW-BTC',
     price=55000000.0,
@@ -74,22 +74,61 @@ strategy.sell(
 )
 ```
 
-#### 포트폴리오 가치 조회
+#### 보유 암호화폐 가치 조회
 ```python
-value = strategy.get_portfolio_value(datetime.now(), '1hour')
+asset_value = backtest.get_asset_value(datetime.now(), '1hour')
 ```
 - `timestamp`: 가치 계산 시점
 - `price_type`: 가격 데이터 타입 ('daily' 또는 '1hour')
 
-### 거래 기록
+#### 포트폴리오 가치 조회
+```python
+portfolio_value = backtest.get_portfolio_value(datetime.now(), '1hour')
+```
+- `timestamp`: 가치 계산 시점
+- `price_type`: 가격 데이터 타입 ('daily' 또는 '1hour')
 
-모든 거래는 데이터베이스에 자동으로 기록되며, 다음 정보가 저장됩니다:
+#### 거래 기록
+
+```python
+transaction_log = backtest.transaction_log
+```
+
+모든 거래 내역은 transaction_log에 저장되며, 다음 정보가 저장됩니다:
 - 거래 시간
+- 암호화폐 이름
 - 거래 유형 (매수/매도)
 - 가격
 - 수량
+- 수수료 유형(퍼센트, 고정)
 - 수수료
 - 총 거래 금액
+- 현금 잔고
+- 보유 암호화폐 가치
+- 포트폴리오 가치
+- 수익률
+
+#### 거래 기록 db 저장
+```python
+backtest = Backtest(
+    backtest_id='test_001',
+    market_name='upbit',
+    initial_balance=10000000.0,
+    save_db=True # default: False
+)
+```
+모든 거래 내역은 db 에 저장되며, 다음 정보가 저장됩니다:
+- 백테스팅 아이디
+- 거래 시간
+- 암호화폐 이름
+- 거래소 이름
+- 거래 유형 (매수/매도)
+- 가격
+- 수량
+- 수수료 유형(퍼센트, 고정)
+- 수수료
+- 총 거래 금액
+- 데이터 생성 시간
 
 ## 주의사항
 

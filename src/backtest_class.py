@@ -37,6 +37,7 @@ class Backtest:
             backtest_id: 백테스트 실행 식별자
             market_name: 거래소 이름 (기본값: 'upbit')
             initial_balance: 초기 투자 금액 (기본값: 10,000,000.0)
+            save_db: db 저장 여부 (기본값: False)
         """
         self.cash_balance = initial_balance
         self.backtest_id = backtest_id
@@ -48,7 +49,7 @@ class Backtest:
         self.save_db = save_db # db 저장 여부
 
     def buy(self, date: datetime, crypto_name: str, price: float, quantity: float, 
-            fee_type: Literal['percent', 'fixed'] = 'percent', fee_amount: float = 0.005):
+            fee_type: Literal['percent', 'fixed'] = 'percent', fee_amount: float = 0.0005):
         """암호화폐 매수 거래를 실행합니다.
         
         Args:
@@ -72,6 +73,7 @@ class Backtest:
             total_amount = price * quantity + fee_amount
         # 포트폴리오 업데이트
         if self.cash_balance < total_amount:
+            print(f'{date} 매수 실패\n현금보유량 : {self.cash_balance}\n투자 시도 금액 : {total_amount}')
             raise ValueError(f"Not enough cash balance to buy {crypto_name}")
         else:
             self.cash_balance -= total_amount
@@ -117,7 +119,7 @@ class Backtest:
 
 
     def sell(self, date: datetime, crypto_name: str, price: float, quantity: float, 
-            fee_type: Literal['percent', 'fixed'] = 'percent', fee_amount: float = 0.005):
+            fee_type: Literal['percent', 'fixed'] = 'percent', fee_amount: float = 0.0005):
         """암호화폐 매도 거래를 실행합니다.
         
         Args:

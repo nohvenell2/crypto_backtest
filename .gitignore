@@ -63,3 +63,11 @@ Thumbs.db
 temp/
 temp*.py
 coverage/
+
+# dklee 임시파일 
+src/dklee/info/*
+src/dklee/info
+
+# python venv 
+venv_cry_bktest/*
+venv_cry_bktest/

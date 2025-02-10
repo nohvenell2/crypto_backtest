@@ -23,9 +23,12 @@ from backtest_strategy import BacktestStrategy
 
 # 전략 인스턴스 생성
 backtest = Backtest(
-    backtest_id='test_001',
-    market_name='upbit',
-    initial_balance=10000000.0
+    backtest_id='test_001', # 백테스팅 아이디(필수)
+    start_date=datetime(2024, 1, 1), # 백테스팅 시작 날짜(필수)
+    market_name='upbit', # 거래소 이름(선택/default: upbit)
+    initial_balance=10000000.0, # 초기 투자 금액(선택/default: 10000000.0)
+    save_db=False,  # db 저장 여부(선택/default: False)
+    debug=False     # 디버그 모드 여부(선택/default: False)
 )
 
 # 매수 실행
@@ -73,6 +76,26 @@ backtest.sell(
     fee_amount=0.0005
 )
 ```
+
+#### 입금 (deposit)
+```python
+backtest.deposit(
+    date=datetime.now(),
+    amount=1000000.0
+)
+```
+- `date`: 입금 시점
+- `amount`: 입금 금액
+
+#### 출금 (withdraw)
+```python
+backtest.withdraw(
+    date=datetime.now(),
+    amount=1000000.0
+)
+```
+- `date`: 출금 시점
+- `amount`: 출금 금액
 
 #### 보유 암호화폐 가치 조회
 ```python

@@ -16,9 +16,13 @@ class Backtest:
         portfolio (dict): 보유 중인 암호화폐 수량 (키: 암호화폐 이름, 값: 수량)
         initial_balance (float): 초기 투자 금액
         trades_count (int): 총 거래 횟수
+        save_db (bool): db 저장 여부
+        debug (bool): 디버그 모드 여부
+    
+    
 
     Example:
-        >>> strategy = Strategy(backtest_id='test_001', initial_balance=10000000.0)
+        >>> strategy = Strategy(backtest_id='test_001', start_date=datetime(2024, 1, 1), initial_balance=10000000.0)
         >>> strategy.buy(
         ...     date=datetime.now(),
         ...     crypto_name='KRW-BTC',
@@ -30,23 +34,34 @@ class Backtest:
         >>> portfolio_value = strategy.get_portfolio_value(datetime.now(), 'daily')
     """
     
-    def __init__(self, backtest_id: str, market_name: str = 'upbit', 
-                initial_balance: float = 10000000.0, save_db: bool = False):
+    def __init__(self, backtest_id: str, start_date: datetime, market_name: str = 'upbit', 
+                initial_balance: float = 10000000.0, save_db: bool = False, debug: bool = False):
         """
         Args:
-            backtest_id: 백테스트 실행 식별자
+            backtest_id: 백테스트 실행 식별자(필수)
+            start_date: 백테스트 시작 시간(필수)
             market_name: 거래소 이름 (기본값: 'upbit')
             initial_balance: 초기 투자 금액 (기본값: 10,000,000.0)
             save_db: db 저장 여부 (기본값: False)
+            debug: 디버그 모드 여부 (기본값: False)
         """
-        self.cash_balance = initial_balance
+        self.start_date = start_date
+        self.cash_balance = 0  # 초기화는 0으로
         self.backtest_id = backtest_id
         self.market_name = market_name
         self.portfolio = {}
         self.transaction_log = []
-        self.initial_balance = initial_balance  # 초기 자본 저장
-        self.trades_count = 0  # 거래 횟수 추적
-        self.save_db = save_db # db 저장 여부
+        self.initial_balance = initial_balance
+        self.trades_count = 0
+        self.save_db = save_db
+        self.debug = debug
+
+        # save_db가 True인 경우 초기 잔고를 deposit으로 기록
+        if self.save_db:
+            self.deposit(self.start_date, initial_balance)
+        else:
+            self.cash_balance = initial_balance  # save_db가 False면 그냥 잔고만 설정
+
 
     def buy(self, date: datetime, crypto_name: str, price: float, quantity: float, 
             fee_type: Literal['percent', 'fixed'] = 'percent', fee_amount: float = 0.0005):
@@ -85,7 +100,7 @@ class Backtest:
         self.trades_count += 1
         asset_value = self.get_asset_value(date, '1hour')
         total_value = asset_value + self.cash_balance
-        return_value = total_value / self.initial_balance - 1
+        return_rate = total_value / self.initial_balance - 1
         transaction_info = {
             'date': date,
             'crypto_name': crypto_name,
@@ -98,7 +113,7 @@ class Backtest:
             'cash_balance': self.cash_balance,
             'asset_value': asset_value,
             'total_value': total_value,
-            'return': return_value
+            'return_rate': return_rate,
         } 
         self.transaction_log.append(transaction_info)
         # db 저장        
@@ -114,9 +129,25 @@ class Backtest:
                 price=price,
                 quantity=quantity,
                 total_amount=total_amount,
+                cash_balance=self.cash_balance,
+                asset_value=asset_value,
+                total_value=total_value,
+                return_rate=return_rate,
             )
+        if self.debug:
+            print(f"\n[매수 시도] {date}")
+            print(f"코인: {crypto_name}")
+            print(f"가격: {price:,.0f} KRW")
+            print(f"수량: {quantity:.8f}")
+            print(f"총 매수 금액: {total_amount:,.0f} KRW")
+            print(f"수수료: {fee_type}, {fee_amount}")
+            print(f"실행 결과:")
+            print(f"- 현금 잔고: {self.cash_balance:,.0f} KRW")
+            print(f"- 자산 가치: {asset_value:,.0f} KRW")
+            print(f"- 총 가치: {total_value:,.0f} KRW")
+            print(f"- 수익률: {return_rate:.2%}")
         return transaction_info
-
+    
 
     def sell(self, date: datetime, crypto_name: str, price: float, quantity: float, 
             fee_type: Literal['percent', 'fixed'] = 'percent', fee_amount: float = 0.0005):
@@ -155,7 +186,7 @@ class Backtest:
         self.trades_count += 1
         asset_value = self.get_asset_value(date, '1hour')
         total_value = asset_value + self.cash_balance
-        return_value = total_value / self.initial_balance - 1
+        return_rate = total_value / self.initial_balance - 1
         transaction_info = {
             'date': date,
             'crypto_name': crypto_name,
@@ -168,9 +199,10 @@ class Backtest:
             'cash_balance': self.cash_balance,
             'asset_value': asset_value,
             'total_value': total_value,
-            'return': return_value
+            'return_rate': return_rate,
         }
         self.transaction_log.append(transaction_info)
+
         # db 저장
         if self.save_db:
             log_transaction(
@@ -184,9 +216,25 @@ class Backtest:
                 price=price,
                 quantity=quantity,
                 total_amount=total_amount,
+                cash_balance=self.cash_balance,
+                asset_value=asset_value,
+                total_value=total_value,
+                return_rate=return_rate,
             )
+        if self.debug:
+            print(f"\n[매도 시도] {date}")
+            print(f"코인: {crypto_name}")
+            print(f"가격: {price:,.0f} KRW")
+            print(f"수량: {quantity:.8f}")
+            print(f"총 매도 금액: {total_amount:,.0f} KRW")
+            print(f"수수료: {fee_type}, {fee_amount}")
+            print(f"실행 결과:")
+            print(f"- 현금 잔고: {self.cash_balance:,.0f} KRW")
+            print(f"- 자산 가치: {asset_value:,.0f} KRW")
+            print(f"- 총 가치: {total_value:,.0f} KRW")
+            print(f"- 수익률: {return_rate:.2%}")
         return transaction_info
-
+    
     def get_quantity(self, crypto_name: str):
         if crypto_name not in self.portfolio:
             return 0
@@ -222,9 +270,139 @@ class Backtest:
         total_value = self.cash_balance + self.get_asset_value(timestamp, price_type)
         return total_value
 
+    def deposit(self, date: datetime, amount: float):
+        """현금 입금을 실행합니다.
+        
+        Args:
+            date: 입금 시점
+            amount: 입금 금액
+            
+        Returns:
+            dict: 거래 정보
+        """
+        self.cash_balance += amount
+        
+        # 거래 내역 기록
+        asset_value = self.get_asset_value(date, '1hour')
+        total_value = asset_value + self.cash_balance
+        return_rate = total_value / self.initial_balance - 1
+        
+        transaction_info = {
+            'date': date,
+            'crypto_name': 'KRW',
+            'price': 1,
+            'quantity': amount,
+            'total_amount': amount,
+            'fee_type': None,
+            'fee_amount': None,
+            'transaction_type': 'Deposit',
+            'cash_balance': self.cash_balance,
+            'asset_value': asset_value,
+            'total_value': total_value,
+            'return_rate': return_rate,
+        }
+        self.transaction_log.append(transaction_info)
+        
+        # db 저장
+        if self.save_db:
+            log_transaction(
+                backtest_id=self.backtest_id,
+                transaction_time=date,
+                crypto_name='KRW',
+                market_name=self.market_name,
+                fee_type='fixed',
+                fee_amount=0,
+                transaction_type='Deposit',
+                price=1,
+                quantity=amount,
+                total_amount=amount,
+                cash_balance=self.cash_balance,
+
+                asset_value=asset_value,
+                total_value=total_value,
+                return_rate=return_rate,
+            )
+        if self.debug:
+            print(f"\n[입금 실행] {date}")
+            print(f"입금액: {amount:,.0f} KRW")
+            print(f"실행 결과:")
+            print(f"- 현금 잔고: {self.cash_balance:,.0f} KRW")
+            print(f"- 자산 가치: {asset_value:,.0f} KRW")
+            print(f"- 총 가치: {total_value:,.0f} KRW")
+            print(f"- 수익률: {return_rate:.2%}")
+        return transaction_info
+
+    def withdraw(self, date: datetime, amount: float):
+        """현금 출금을 실행합니다.
+        
+        Args:
+            date: 출금 시점
+            amount: 출금 금액
+            
+        Returns:
+            dict: 거래 정보
+            
+        Raises:
+            ValueError: 잔고가 부족한 경우
+        """
+        if self.cash_balance < amount:
+            raise ValueError(f"Not enough cash balance to withdraw {amount}")
+        
+        self.cash_balance -= amount
+        
+        # 거래 내역 기록
+        asset_value = self.get_asset_value(date, '1hour')
+        total_value = asset_value + self.cash_balance
+        return_rate = total_value / self.initial_balance - 1
+        
+        transaction_info = {
+            'date': date,
+            'crypto_name': 'KRW',
+            'price': 1,
+            'quantity': amount,
+            'total_amount': amount,
+            'fee_type': None,
+            'fee_amount': None,
+            'transaction_type': 'Withdraw',
+            'cash_balance': self.cash_balance,
+            'asset_value': asset_value,
+            'total_value': total_value,
+            'return_rate': return_rate,
+        }
+        self.transaction_log.append(transaction_info)
+        
+        # db 저장
+        if self.save_db:
+            log_transaction(
+                backtest_id=self.backtest_id,
+                transaction_time=date,
+                crypto_name='KRW',
+                market_name=self.market_name,
+                fee_type='fixed',
+                fee_amount=0,
+                transaction_type='Withdraw',
+                price=1,
+                quantity=amount,
+                total_amount=amount,
+                cash_balance=self.cash_balance,
+                asset_value=asset_value,
+                total_value=total_value,
+                return_rate=return_rate,
+            )
+        if self.debug:
+            print(f"\n[출금 실행] {date}")
+            print(f"출금액: {amount:,.0f} KRW")
+            print(f"실행 결과:")
+            print(f"- 현금 잔고: {self.cash_balance:,.0f} KRW")
+            print(f"- 자산 가치: {asset_value:,.0f} KRW")
+            print(f"- 총 가치: {total_value:,.0f} KRW")
+            print(f"- 수익률: {return_rate:.2%}")
+        return transaction_info
+
 if __name__ == '__main__':
-    strategy = Backtest(backtest_id='test', market_name='upbit')
+    strategy = Backtest(backtest_id='test', start_date=datetime(2024, 12, 12), market_name='upbit', save_db=True, debug=True)
     strategy.buy(datetime.now(), 'KRW-BTC', 10000000, 0.0001, fee_type='percent', fee_amount=0.005)
+
     strategy.sell(datetime.now(), 'KRW-BTC', 10000000, 0.0001, fee_type='percent', fee_amount=0.005)
 
 

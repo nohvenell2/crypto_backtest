@@ -5,6 +5,7 @@ from sqlalchemy import text
 from util.db_engine import engine
 import pandas as pd
 import math
+from datetime import datetime, timedelta
 
 def get_historical_data(engine, market, start_date, end_date):
     query = text("""
@@ -23,9 +24,9 @@ def get_historical_data(engine, market, start_date, end_date):
     return df
 
 
-def run_backtest(crypto_name, k=0.7,fee=0.0005, start_date='2022-01-01', end_date='2022-12-31',save_db=False):
+def run_backtest(backtest_id, crypto_name, start_date, end_date, k=0.7,fee=0.0005, save_db=False,debug=False):
     df = get_historical_data(engine, crypto_name, start_date, end_date)
-    backtest = Backtest(backtest_id='변동성돌파전략_temp',save_db=save_db)
+    backtest = Backtest(backtest_id=backtest_id,start_date=datetime.fromisoformat(start_date),save_db=save_db,debug=debug)
     prev_high, prev_low, target_price, position, k_price = 0, 0, 0, False, 0
     for id, row in df.iterrows():
         # 최초 거래 시점 설정
@@ -53,8 +54,10 @@ def run_backtest(crypto_name, k=0.7,fee=0.0005, start_date='2022-01-01', end_dat
         if row['high'] > target_price:
             try:
                 quantity = (backtest.cash_balance / (target_price * (1 + fee)))*0.999
+                # 거래 시각을 6시간 뒤로 조정
+                trade_time = pd.to_datetime(row['timestamp_kst']) + timedelta(hours=6)
                 backtest.buy(
-                    date = row['timestamp_kst'],
+                    date = trade_time,
                     price = target_price,
                     quantity = quantity,
                     crypto_name = crypto_name,
@@ -67,9 +70,28 @@ def run_backtest(crypto_name, k=0.7,fee=0.0005, start_date='2022-01-01', end_dat
         # 이전 최고가, 최저가 업데이트
         prev_high = row['high']
         prev_low = row['low']
-    for i in backtest.transaction_log:
-        print(f'{i["date"]} {i["crypto_name"]} {i["transaction_type"]} // {i["price"]} {i["quantity"]} {i["total_amount"]}')
-        print(f'CASH : {math.floor(i["cash_balance"])} ASSET : {math.floor(i["asset_value"])} TOTAL : {math.floor(i["total_value"])} RETURN : {math.floor(i["return"]*100)}%')
-
+    print(f'{backtest.trades_count}회 거래 / 수익률 : {backtest.transaction_log[-1]["return_rate"]:.2%}')
 if __name__ == '__main__':
-    run_backtest('KRW-BTC', k=0.7,fee=0.0005, start_date='2024-01-01', end_date='2024-12-31')
+
+    # 년도별 k 값 변경후 백테스트
+    # 년도별 k 값 변경후 백테스트
+    # 2022 backtest
+    print('2022 backtest')
+    run_backtest('VB_2022_k_05', 'KRW-BTC', '2022-01-01', '2022-12-31', k=0.5,fee=0.0005, save_db=True)
+    run_backtest('VB_2022_k_07', 'KRW-BTC', '2022-01-01', '2022-12-31', k=0.7,fee=0.0005, save_db=True)
+    run_backtest('VB_2022_k_10', 'KRW-BTC', '2022-01-01', '2022-12-31', k=1.0,fee=0.0005, save_db=True)
+    # 2023 backtest
+    print('2023 backtest')
+    run_backtest('VB_2023_k_05', 'KRW-BTC', '2023-01-01', '2023-12-31', k=0.5,fee=0.0005, save_db=True)
+    run_backtest('VB_2023_k_07', 'KRW-BTC', '2023-01-01', '2023-12-31', k=0.7,fee=0.0005, save_db=True)
+    run_backtest('VB_2023_k_10', 'KRW-BTC', '2023-01-01', '2023-12-31', k=1.0,fee=0.0005, save_db=True)
+    # 2024 backtest
+    print('2024 backtest')
+    run_backtest('VB_2024_k_05', 'KRW-BTC', '2024-01-01', '2024-12-31', k=0.5,fee=0.0005, save_db=True)
+    run_backtest('VB_2024_k_07', 'KRW-BTC', '2024-01-01', '2024-12-31', k=0.7,fee=0.0005, save_db=True)
+    run_backtest('VB_2024_k_10', 'KRW-BTC', '2024-01-01', '2024-12-31', k=1.0,fee=0.0005, save_db=True)
+    # 2022-2024 backtest
+    print('2022-2024 backtest')
+    run_backtest('VB_2022_2024_k_05', 'KRW-BTC', '2022-01-01', '2024-12-31', k=0.5,fee=0.0005, save_db=True)
+    run_backtest('VB_2022_2024_k_07', 'KRW-BTC', '2022-01-01', '2024-12-31', k=0.7,fee=0.0005, save_db=True)
+    run_backtest('VB_2022_2024_k_10', 'KRW-BTC', '2022-01-01', '2024-12-31', k=1.0,fee=0.0005, save_db=True)    

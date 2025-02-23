@@ -48,18 +48,26 @@ class TripleScreenStrategy:
         
     def calculate_weekly_trend(self, data: pd.DataFrame) -> pd.Series:
         """첫 번째 스크린: 주간 트렌드 분석"""
+        # 더 긴 기간의 이동평균 사용
         weekly_ema = data['close'].ewm(span=self.params['long_term_window']).mean()
+        weekly_sma = data['close'].rolling(window=self.params['long_term_window']*2).mean()
         
+        # MACD 계산
         exp1 = data['close'].ewm(span=self.params['macd_fast']).mean()
         exp2 = data['close'].ewm(span=self.params['macd_slow']).mean()
         macd = exp1 - exp2
         signal = macd.ewm(span=self.params['macd_signal']).mean()
+        macd_hist = macd - signal
         
-        # 조건 완화: EMA 또는 MACD 하나만 만족해도 됨
-        trend = pd.Series(index=data.index, dtype=bool)
-        trend = (data['close'] > weekly_ema) | (macd > signal)
+        # 추세 강도 계산 (개선)
+        trend_strength = (
+            (data['close'] > weekly_ema) &  # 가격이 EMA 위
+            (weekly_ema > weekly_sma) &     # EMA가 SMA 위
+            (macd_hist > 0) &               # MACD 히스토그램 양수
+            (macd_hist > macd_hist.shift(1))  # MACD 히스토그램 증가
+        )
         
-        return trend
+        return trend_strength
     
     def calculate_daily_momentum(self, data: pd.DataFrame) -> pd.Series:
         """두 번째 스크린: 일간 모멘텀 분석"""
@@ -76,9 +84,21 @@ class TripleScreenStrategy:
         lower_band = middle_band - (self.params['bb_std'] * std_dev)
         upper_band = middle_band + (self.params['bb_std'] * std_dev)
         
-        # 매수/매도 조건 분리
-        buy_condition = (rsi < 45) | (data['close'] < middle_band)  # 매수 조건 완화
-        sell_condition = (rsi > 55) | (data['close'] > middle_band)  # 매도 조건 추가
+        # 매수 조건 개선
+        buy_condition = (
+            (rsi < 40) &  # RSI 과매도
+            (data['close'] < lower_band * 1.05) &  # 밴드 하단 근처
+            (data['volume'] > data['volume'].rolling(window=20).mean() * 1.3)  # 거래량 증가
+        )
+        
+        # 매도 조건 개선
+        sell_condition = (
+            (rsi > 70) &  # RSI 과매수
+            (
+                (data['close'] > upper_band) |  # 상단 밴드 돌파
+                (data['close'] < middle_band * 0.98)  # 중간 밴드 하향 이탈
+            )
+        )
         
         return buy_condition, sell_condition
     
@@ -88,56 +108,147 @@ class TripleScreenStrategy:
         short_ma = data['close'].rolling(window=self.params['short_term_window']).mean()
         prev_short_ma = short_ma.shift(1)
         
-        # 거래량 계산
+        # 거래량 분석
         volume_ma = data['volume'].rolling(window=self.params['short_term_window']).mean()
-        volume_increase = data['volume'] > volume_ma * 0.8  # 거래량 조건 완화
+        volume_increase = data['volume'] > volume_ma * 1.3
         
-        # 스토캐스틱 계산
-        low_min = data['low'].rolling(window=14).min()
-        high_max = data['high'].rolling(window=14).max()
-        k_percent = 100 * (data['close'] - low_min) / (high_max - low_min)
-        d_percent = k_percent.rolling(window=3).mean()
+        # 가격 모멘텀 계산
+        momentum = data['close'].diff(periods=3) / data['close'].shift(3) * 100
         
-        # 매수/매도 조건 분리
-        buy_signal = (k_percent < 40) | volume_increase  # 매수 조건 완화
-        sell_signal = (k_percent > 60) | (data['close'] < prev_short_ma)  # 매도 조건 추가
+        # 매수 조건 완화
+        buy_signal = (
+            (momentum > 0.5) &  # 모멘텀 기준 완화 (1.0->0.5)
+            volume_increase &
+            (data['close'] > prev_short_ma * 1.002)  # 상승 추세 기준 완화
+        )
+        
+        # 매도 조건 조정
+        sell_signal = (
+            (momentum < -1.5) |  # 하락 모멘텀 기준 완화
+            (data['close'] < prev_short_ma * 0.995)  # 하락 추세 기준 완화
+        )
         
         return buy_signal, sell_signal
     
-    def generate_signals(self, data: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+    def calculate_market_condition(self, data: pd.DataFrame) -> pd.Series:
+        """시장 상황 분석"""
+        # 변동성 계산 (ATR 사용)
+        high = data['high']
+        low = data['low']
+        close = data['close']
+        
+        tr1 = high - low
+        tr2 = abs(high - close.shift(1))
+        tr3 = abs(low - close.shift(1))
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(window=14).mean()
+        
+        # 변동성 돌파 계산
+        daily_range = (high - low).rolling(window=20).mean()
+        volatility_breakthrough = close > (close.shift(1) + daily_range * 0.5)
+        
+        # 거래량 분석
+        volume = data['volume']
+        volume_ma = volume.rolling(window=20).mean()
+        volume_ratio = volume / volume_ma
+        
+        # 시간대별 거래량 가중치 (한국 시간 기준)
+        hour = pd.to_datetime(data.index).hour
+        asia_market = (hour >= 9) & (hour <= 15)  # 아시아 거래시간
+        us_market = (hour >= 21) | (hour <= 5)    # 미국 거래시간
+        
+        # 변동성 점수 (0~30)
+        volatility_score = ((atr / close) * 100).rolling(window=20).mean()
+        
+        # 거래량 점수 (0~40)
+        volume_score = (volume_ratio * 20).clip(0, 40)
+        
+        # 추가: 상승 추세 강도 계산
+        ma20 = close.rolling(window=20).mean()
+        ma50 = close.rolling(window=50).mean()
+        trend_strength = (close > ma20) & (ma20 > ma50)
+        
+        # 추가: 가격 모멘텀
+        momentum = close.pct_change(periods=12).rolling(window=24).mean() * 100
+        
+        # 시장 점수 계산 수정
+        market_score = pd.Series(0, index=data.index)
+        market_score += (volatility_score.clip(0, 25))  # 변동성 비중 감소
+        market_score += (volume_score.clip(0, 35))      # 거래량 비중 감소
+        market_score += trend_strength * 20              # 추세 강도 반영
+        market_score += (momentum.clip(-10, 10) + 10) * 2  # 모멘텀 반영
+        
+        return market_score, volatility_breakthrough
+    
+    def calculate_position_size(self, market_score: float, current_price: float, 
+                              available_balance: float) -> float:
+        """시장 상황에 따른 포지션 크기 조절"""
+        base_size = 0.15  # 기본 포지션 크기 증가 (0.1->0.15)
+        
+        # 시장 점수에 따른 포지션 크기 조절
+        if market_score >= 85:  # 매우 좋은 시장 상황
+            position_size = base_size * 2.0
+        elif market_score >= 75:  # 좋은 시장 상황
+            position_size = base_size * 1.5
+        elif market_score >= 65:  # 괜찮은 시장 상황
+            position_size = base_size * 1.2
+        elif market_score <= 40:  # 나쁜 시장 상황
+            position_size = base_size * 0.5
+        else:
+            position_size = base_size
+        
+        return position_size
+    
+    def generate_signals(self, data: pd.DataFrame) -> tuple[pd.Series, pd.Series, pd.Series]:
         """매수/매도 시그널 생성"""
         trend = self.calculate_weekly_trend(data)
         momentum_buy, momentum_sell = self.calculate_daily_momentum(data)
         entry_buy, entry_sell = self.calculate_entry_signal(data)
+        market_score, volatility_breakthrough = self.calculate_market_condition(data)
         
-        # 매수 시그널: 두 조건 중 하나만 만족해도 됨
-        buy_signal = trend & (momentum_buy | entry_buy)
+        # 매수 시그널 완화
+        buy_signal = (
+            trend &  # 추세 확인
+            ((momentum_buy & market_score > 50) |  # 시장 점수 기준 완화 (65->50)
+             (entry_buy & volatility_breakthrough))  # 진입 시그널과 변동성 돌파
+        )
         
-        # 매도 시그널: 추세 반전이나 모멘텀/진입 조건 중 하나라도 만족하면 매도
-        sell_signal = (~trend) | momentum_sell | entry_sell
+        # 매도 시그널 조정
+        sell_signal = (
+            (~trend & market_score < 35) |  # 시장 점수 기준 완화 (40->35)
+            (momentum_sell & market_score < 45) |  # 시장 점수 기준 완화 (50->45)
+            entry_sell
+        )
         
-        return buy_signal, sell_signal
+        return buy_signal, sell_signal, market_score
 
 def run_triple_screen_strategy(
     start_date: datetime,
     end_date: datetime,
     initial_balance: float = 10_000_000,
-    position_size: float = 0.2,
+    position_size: float = 0.1,
     market: str = 'KRW-BTC'
 ) -> None:
     """삼중 스크리닝 전략으로 백테스팅을 실행합니다."""
     
-    # 전략 파라미터 설정
+    # 전략 파라미터 수정
     params = {
-        'long_term_window': 26,    # 주간 트렌드
-        'medium_term_window': 14,  # 일간 모멘텀
-        'short_term_window': 10,   # 단기 진입
+        'long_term_window': 40,     # 장기 추세 확인 기간 증가
+        'medium_term_window': 20,   # 중기 모멘텀 기간
+        'short_term_window': 10,    # 단기 진입 기간
         'rsi_period': 14,
         'macd_fast': 12,
         'macd_slow': 26,
         'macd_signal': 9,
         'bb_window': 20,
-        'bb_std': 2
+        'bb_std': 2.0,
+        'profit_target': 8.0,       # 이익실현 목표 상향
+        'stop_loss': -4.0,         # 손절 기준 완화
+        'trailing_stop': 3.0,      # 트레일링 스탑 범위 확대
+        'min_holding_hours': 12,   # 최소 보유 시간 증가
+        'max_holding_hours': 96,   # 최대 보유 시간 증가
+        'min_market_score': 60,
+        'max_loss_per_day': 5.0
     }
     
     # 백테스트 인스턴스 생성
@@ -145,20 +256,23 @@ def run_triple_screen_strategy(
         backtest_id=f'triple_screen_{market}_{datetime.now().strftime("%Y%m%d_%H%M")}',
         market_name='upbit',
         initial_balance=initial_balance,
+        start_date=start_date,
         save_db=False
     )
     
     # 가격 데이터 조회 및 전략 인스턴스 생성
     df = fetch_price_data(start_date, end_date, market)
     strategy = TripleScreenStrategy(params)
-    buy_signals, sell_signals = strategy.generate_signals(df)
+    buy_signals, sell_signals, market_scores = strategy.generate_signals(df)
     
     # 초기 상태
     in_position = False
     entry_price = 0
+    entry_time = None  # 매수 시간 저장 변수 추가
     trade_count = 0
     profitable_trades = 0
     total_profit_loss = 0
+    trades = []
     
     print("\n=== 삼중 스크리닝 전략 백테스팅 시작 ===")
     print(f"시작 시간: {start_date}")
@@ -172,9 +286,119 @@ def run_triple_screen_strategy(
         current_price = df['close'].iloc[i]
         
         try:
-            if not in_position and buy_signals.iloc[i]:
+            if in_position:
+                # 매도 여부 초기화
+                should_sell = False
+                sell_reason = ""
+                
+                # 최소 보유 시간 체크
+                holding_hours = (current_time - entry_time).total_seconds() / 3600
+                if holding_hours < params['min_holding_hours']:
+                    continue
+                
+                # 최대 보유 시간 체크
+                if holding_hours > params['max_holding_hours']:
+                    should_sell = True
+                    sell_reason = "보유시간 초과"
+                
+                # 현재 수익률 계산
+                current_return = (current_price / entry_price - 1) * 100
+                
+                # 손절 체크
+                if current_return <= params['stop_loss']:
+                    should_sell = True
+                    sell_reason = "손절"
+                
+                # 이익실현 체크
+                elif current_return >= params['profit_target']:
+                    should_sell = True
+                    sell_reason = "이익실현"
+                
+                # 트레일링 스탑 로직
+                elif current_return > params['profit_target'] * 0.5:  # 목표 수익의 절반 도달
+                    trailing_stop = max(params['trailing_stop'], current_return * 0.5)  # 동적 트레일링 스탑
+                    if current_return - trailing_stop < 0:
+                        should_sell = True
+                        sell_reason = "트레일링 스탑"
+                
+                # 매도 시그널 체크
+                elif sell_signals.iloc[i]:
+                    should_sell = True
+                    sell_reason = "매도신호"
+                
+                if should_sell:
+                    quantity = backtest.get_quantity(market)
+                    if quantity > 0:
+                        before_balance = backtest.get_portfolio_value(current_time)
+                        backtest.sell(
+                            date=current_time,
+                            crypto_name=market,
+                            price=current_price,
+                            quantity=quantity,
+                            fee_type='percent',
+                            fee_amount=0.0005
+                        )
+                        after_balance = backtest.get_portfolio_value(current_time)
+                        
+                        profit_loss = after_balance - before_balance
+                        profit_loss_pct = (current_price / entry_price - 1) * 100
+                        total_profit_loss += profit_loss
+                        
+                        # 거래 기록 추가
+                        trades.append({
+                            'date': current_time,
+                            'type': 'sell',
+                            'price': current_price,
+                            'quantity': quantity,
+                            'profit': profit_loss,
+                            'profit_pct': profit_loss_pct
+                        })
+                        
+                        if profit_loss > 0:
+                            profitable_trades += 1
+                        
+                        print(f"\n[매도 #{trade_count}] - {sell_reason}")
+                        print(f"시간: {current_time}")
+                        print(f"가격: {current_price:,.0f}원")
+                        print(f"수량: {quantity:.8f} {market}")
+                        print(f"매도 금액: {(quantity * current_price):,.0f}원")
+                        print(f"거래 수익률: {profit_loss_pct:+.2f}%")
+                        print(f"거래 손익: {profit_loss:+,.0f}원")
+                        print(f"현금 잔고: {backtest.cash_balance:,.0f}원")
+                        
+                        in_position = False
+            
+            elif buy_signals.iloc[i]:
+                # 매수 전 추가 검증 조건 완화
+                if i >= 2:
+                    price_change = (df['close'].iloc[i] / df['close'].iloc[i-2] - 1) * 100
+                    volume_change = (df['volume'].iloc[i] / df['volume'].iloc[i-2] - 1) * 100
+                    
+                    # 급격한 가격 상승 제한 완화
+                    if price_change > 5.0:  # 3%에서 5%로 상향
+                        continue
+                    
+                    # 거래량 조건 완화
+                    if volume_change < 10.0:  # 20%에서 10%로 하향
+                        continue
+                
                 # 매수 신호
                 available_balance = backtest.cash_balance
+                position_size = strategy.calculate_position_size(
+                    market_scores.iloc[i],
+                    current_price,
+                    available_balance
+                )
+                
+                # 일일 손실 체크
+                today = current_time.date()
+                today_trades = [t for t in trades if t['date'].date() == today]
+                today_loss = sum(t['profit'] for t in today_trades if t['profit'] < 0)
+                
+                if abs(today_loss) > params['max_loss_per_day'] * initial_balance / 100:
+                    print(f"일일 손실 한도 도달: {today_loss:,.0f}원")
+                    continue
+                
                 quantity = (available_balance * position_size) / current_price
                 
                 if quantity * current_price >= 5000:  # 최소 주문금액 5000원
@@ -187,8 +411,20 @@ def run_triple_screen_strategy(
                         fee_type='percent',
                         fee_amount=0.0005
                     )
+                    
+                    # 거래 기록 추가
+                    trades.append({
+                        'date': current_time,
+                        'type': 'buy',
+                        'price': current_price,
+                        'quantity': quantity,
+                        'profit': 0,
+                        'profit_pct': 0
+                    })
+                    
                     in_position = True
                     entry_price = current_price
+                    entry_time = current_time  # 매수 시간 저장
                     
                     print(f"\n[매수 #{trade_count}]")
                     print(f"시간: {current_time}")
@@ -196,39 +432,6 @@ def run_triple_screen_strategy(
                     print(f"수량: {quantity:.8f} {market}")
                     print(f"매수 금액: {(quantity * current_price):,.0f}원")
                     print(f"현금 잔고: {backtest.cash_balance:,.0f}원")
-                    
-            elif in_position and sell_signals.iloc[i]:
-                # 매도 신호
-                quantity = backtest.get_quantity(market)
-                if quantity > 0:
-                    before_balance = backtest.get_portfolio_value(current_time)
-                    backtest.sell(
-                        date=current_time,
-                        crypto_name=market,
-                        price=current_price,
-                        quantity=quantity,
-                        fee_type='percent',
-                        fee_amount=0.0005
-                    )
-                    after_balance = backtest.get_portfolio_value(current_time)
-                    
-                    profit_loss = after_balance - before_balance
-                    profit_loss_pct = (current_price / entry_price - 1) * 100
-                    total_profit_loss += profit_loss
-                    
-                    if profit_loss > 0:
-                        profitable_trades += 1
-                    
-                    print(f"\n[매도 #{trade_count}]")
-                    print(f"시간: {current_time}")
-                    print(f"가격: {current_price:,.0f}원")
-                    print(f"수량: {quantity:.8f} {market}")
-                    print(f"매도 금액: {(quantity * current_price):,.0f}원")
-                    print(f"거래 수익률: {profit_loss_pct:+.2f}%")
-                    print(f"거래 손익: {profit_loss:+,.0f}원")
-                    print(f"현금 잔고: {backtest.cash_balance:,.0f}원")
-                    
-                    in_position = False
                     
         except ValueError as e:
             print(f"\n거래 실패: {e}")
@@ -288,8 +491,8 @@ if __name__ == "__main__":
     parser.add_argument('--end-date', type=str, help='종료 날짜 (YYYY-MM-DD)')
     parser.add_argument('--initial-balance', type=float, default=10_000_000,
                       help='초기 투자금액 (기본값: 10,000,000원)')
-    parser.add_argument('--position-size', type=float, default=0.2,
-                      help='포지션 크기 (0.0 ~ 1.0, 기본값: 0.2)')
+    parser.add_argument('--position-size', type=float, default=0.1,
+                      help='포지션 크기 (0.0 ~ 1.0, 기본값: 0.1)')
     parser.add_argument('--coin', type=str, default='KRW-BTC',
                       choices=['KRW-BTC', 'KRW-ETH', 'KRW-XRP'],
                       help='거래할 코인 (기본값: KRW-BTC)')

@@ -7,6 +7,9 @@ from typing import Dict, List, Tuple
 import multiprocessing as mp
 from functools import partial
 from tqdm import tqdm
+import numpy as np
+from deap import base, creator, tools, algorithms
+import random
 
 # 상위 디렉토리를 파이썬 경로에 추가
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -20,108 +23,211 @@ from triple_screen_strategy import (
 )
 from backtest_class import Backtest
 import argparse
+from util.db_engine import engine
+from sqlalchemy import text
 
 # 전역 변수로 카운터와 총 조합 수 선언
 progress_counter = None
 total_combinations = 0
 
-def evaluate_strategy(
-    df: pd.DataFrame,
-    params: Dict,
-    initial_balance: float,
-    position_size: float,
-    market: str,
-    start_date: datetime,
-    end_date: datetime
-) -> Tuple[float, float, int, float]:
-    """주어진 파라미터로 전략을 평가합니다."""
+def get_available_date_range(market: str = 'KRW-BTC') -> tuple[datetime, datetime]:
+    """데이터베이스에서 사용 가능한 날짜 범위를 조회합니다."""
+    query = text("""
+        SELECT 
+            DATE_TRUNC('day', MIN(timestamp_kst))::timestamp,
+            DATE_TRUNC('day', MAX(timestamp_kst))::timestamp
+        FROM upbit_1hour_price
+        WHERE market = :market
+    """)
     
-    try:
-        strategy = TripleScreenStrategy(params)
-        buy_signals, sell_signals = strategy.generate_signals(df)
-        
-        backtest = Backtest(
-            backtest_id=f'optimize_triple_{market}_{datetime.now().strftime("%Y%m%d_%H%M")}',
-            market_name='upbit',
-            initial_balance=initial_balance,
-            save_db=False
+    with engine.connect() as conn:
+        result = conn.execute(query, {"market": market}).first()
+        return (
+            result[0].replace(tzinfo=None),
+            result[1].replace(tzinfo=None)
         )
-        
-        in_position = False
-        trade_count = 0
-        profitable_trades = 0
-        entry_price = 0
-        
-        for i in range(len(df)):
-            current_time = df['timestamp_kst'].iloc[i]
-            current_price = df['close'].iloc[i]
+
+def evaluate_strategy(individual: List[int], data: pd.DataFrame) -> Tuple[float,]:
+    """전략의 성능을 평가합니다."""
+    params = {
+        'long_term_window': individual[0],
+        'medium_term_window': individual[1],
+        'short_term_window': individual[2],
+        'rsi_period': individual[3],
+        'macd_fast': individual[4],
+        'macd_slow': individual[5],
+        'macd_signal': individual[6],
+        'bb_window': individual[7],
+        'bb_std': individual[8] / 10
+    }
+    
+    strategy = TripleScreenStrategy(params)
+    buy_signals, sell_signals = strategy.generate_signals(data)
+    
+    # 수익률 계산
+    position = 0
+    entry_price = 0
+    total_return = 0
+    trades = 0
+    profitable_trades = 0
+    max_drawdown = 0
+    current_drawdown = 0
+    peak_value = 1.0  # 초기 자산을 1로 표준화
+    
+    for i in range(len(data)):
+        if position == 0 and buy_signals.iloc[i]:
+            position = 1
+            entry_price = data['close'].iloc[i]
+            trades += 1
+        elif position == 1 and sell_signals.iloc[i]:
+            position = 0
+            exit_price = data['close'].iloc[i]
+            returns = (exit_price / entry_price - 1) * 100
+            total_return += returns
             
-            try:
-                if not in_position and buy_signals.iloc[i]:
-                    # 매수 신호
-                    available_balance = backtest.cash_balance
-                    quantity = (available_balance * position_size) / current_price
-                    
-                    if quantity * current_price >= 5000:
-                        trade_count += 1
-                        before_balance = backtest.get_portfolio_value(current_time)
-                        backtest.buy(
-                            date=current_time,
-                            crypto_name=market,
-                            price=current_price,
-                            quantity=quantity,
-                            fee_type='percent',
-                            fee_amount=0.0005
-                        )
-                        entry_price = current_price
-                        in_position = True
-                        
-                elif in_position and sell_signals.iloc[i]:
-                    # 매도 신호
-                    quantity = backtest.get_quantity(market)
-                    if quantity > 0:
-                        before_balance = backtest.get_portfolio_value(current_time)
-                        backtest.sell(
-                            date=current_time,
-                            crypto_name=market,
-                            price=current_price,
-                            quantity=quantity,
-                            fee_type='percent',
-                            fee_amount=0.0005
-                        )
-                        after_balance = backtest.get_portfolio_value(current_time)
-                        
-                        if after_balance > before_balance:
-                            profitable_trades += 1
-                            
-                        in_position = False
-                        
-            except ValueError:
-                continue
+            if returns > 0:
+                profitable_trades += 1
+                
+            # 최대 손실폭 계산
+            current_value = 1.0 * (1 + returns/100)
+            if current_value > peak_value:
+                peak_value = current_value
+            current_drawdown = (peak_value - current_value) / peak_value * 100
+            max_drawdown = max(max_drawdown, current_drawdown)
+    
+    if trades < 5:  # 최소 거래 횟수 제한
+        return -100.0,
         
-        final_value = backtest.get_portfolio_value(end_date)
-        total_return = (final_value / initial_balance - 1) * 100
-        win_rate = (profitable_trades / trade_count * 100) if trade_count > 0 else 0
-        
-        return total_return, win_rate, trade_count, final_value
-        
-    except Exception as e:
-        print(f"Error in evaluate_strategy: {str(e)}")
-        return 0.0, 0.0, 0, initial_balance
+    win_rate = (profitable_trades / trades * 100) if trades > 0 else 0
+    avg_return = total_return / trades if trades > 0 else 0
+    
+    # 종합 점수 계산
+    score = (
+        0.4 * win_rate +           # 승률 40% 반영
+        0.3 * avg_return +         # 평균 수익률 30% 반영
+        0.2 * (trades * 2) +       # 거래 횟수 20% 반영 (많을수록 좋음)
+        0.1 * (-max_drawdown)      # 최대 손실폭 10% 반영 (적을수록 좋음)
+    )
+    
+    return score,
+
+def optimize_parameters(
+    market: str = 'KRW-BTC',
+    train_months: int = 12,  # 연 단위에서 월 단위로 변경
+    population_size: int = 50,
+    generations: int = 30,
+    cpu_count: int = None
+) -> Dict:
+    """유전 알고리즘을 사용하여 전략 파라미터를 최적화합니다."""
+    
+    # 데이터 준비
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=train_months*30)  # 연 단위를 월 단위로 변경
+    data = fetch_price_data(start_date, end_date, market)
+    
+    if cpu_count is None:
+        cpu_count = mp.cpu_count() - 1
+    
+    # DEAP 설정
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+    
+    toolbox = base.Toolbox()
+    
+    # 파라미터 범위 정의
+    toolbox.register("long_term_window", random.randint, 20, 40)
+    toolbox.register("medium_term_window", random.randint, 10, 20)
+    toolbox.register("short_term_window", random.randint, 5, 15)
+    toolbox.register("rsi_period", random.randint, 10, 20)
+    toolbox.register("macd_fast", random.randint, 8, 16)
+    toolbox.register("macd_slow", random.randint, 20, 30)
+    toolbox.register("macd_signal", random.randint, 7, 12)
+    toolbox.register("bb_window", random.randint, 15, 25)
+    toolbox.register("bb_std", random.randint, 15, 25)  # 1.5 ~ 2.5를 위해 10으로 나눔
+    
+    # 개체 생성 함수
+    def create_individual():
+        return [
+            toolbox.long_term_window(),
+            toolbox.medium_term_window(),
+            toolbox.short_term_window(),
+            toolbox.rsi_period(),
+            toolbox.macd_fast(),
+            toolbox.macd_slow(),
+            toolbox.macd_signal(),
+            toolbox.bb_window(),
+            toolbox.bb_std()
+        ]
+    
+    toolbox.register("individual", tools.initIterate, creator.Individual, create_individual)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    
+    # 유전 연산자 설정
+    toolbox.register("evaluate", evaluate_strategy, data=data)
+    toolbox.register("mate", tools.cxTwoPoint)
+    toolbox.register("mutate", tools.mutUniformInt, low=[20,10,5,10,8,20,7,15,15], 
+                     up=[40,20,15,20,16,30,12,25,25], indpb=0.2)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+    
+    # 병렬 처리 설정
+    pool = mp.Pool(cpu_count)
+    toolbox.register("map", pool.map)
+    
+    # 초기 population 생성
+    pop = toolbox.population(n=population_size)
+    hof = tools.HallOfFame(1)
+    stats = tools.Statistics(lambda ind: ind.fitness.values)
+    stats.register("avg", np.mean)
+    stats.register("min", np.min)
+    stats.register("max", np.max)
+    
+    print(f"\n=== {market} 파라미터 최적화 시작 ===")
+    print(f"학습 기간: {start_date.date()} ~ {end_date.date()}")
+    print(f"Population 크기: {population_size}")
+    print(f"세대 수: {generations}")
+    print(f"CPU 코어 수: {cpu_count}")
+    print("=" * 50)
+    
+    # 유전 알고리즘 실행
+    pop, logbook = algorithms.eaSimple(pop, toolbox, cxpb=0.7, mutpb=0.3, 
+                                     ngen=generations, stats=stats, 
+                                     halloffame=hof, verbose=True)
+    
+    pool.close()
+    
+    # 최적 파라미터 반환
+    best_individual = hof[0]
+    best_params = {
+        'long_term_window': best_individual[0],
+        'medium_term_window': best_individual[1],
+        'short_term_window': best_individual[2],
+        'rsi_period': best_individual[3],
+        'macd_fast': best_individual[4],
+        'macd_slow': best_individual[5],
+        'macd_signal': best_individual[6],
+        'bb_window': best_individual[7],
+        'bb_std': best_individual[8] / 10
+    }
+    
+    print("\n=== 최적화 결과 ===")
+    print(f"최적 파라미터:")
+    for key, value in best_params.items():
+        print(f"- {key}: {value}")
+    print(f"평균 거래 수익률: {hof[0].fitness.values[0]:.2f}%")
+    
+    return best_params
 
 def evaluate_strategy_wrapper(params: Dict, df: pd.DataFrame, initial_balance: float, 
                             position_size: float, market: str, start_date: datetime, 
                             end_date: datetime) -> Dict:
     """병렬 처리를 위한 evaluate_strategy 래퍼 함수"""
-    total_return, win_rate, trade_count, final_value = evaluate_strategy(
-        df, params, initial_balance, position_size, market, start_date, end_date
-    )
+    result = evaluate_strategy(params, df)
     return {
         'params': params,
-        'total_return': total_return,
-        'win_rate': win_rate,
-        'trade_count': trade_count,
-        'final_value': final_value
+        'total_return': result[0],
+        'win_rate': 0.0,  # win_rate는 유전 알고리즘에서 계산되지 않음
+        'trade_count': 0,  # trade_count는 유전 알고리즘에서 계산되지 않음
+        'final_value': initial_balance * (1 + result[0] / 100)
     }
 
 def estimate_execution_time(total_combinations: int, n_processes: int) -> str:
@@ -255,56 +361,41 @@ def optimize_strategy(
 if __name__ == '__main__':
     mp.freeze_support()  # Windows에서 필요
     
-    parser = argparse.ArgumentParser(description='삼중 스크리닝 전략의 최적 파라미터를 찾습니다.')
+    parser = argparse.ArgumentParser(description='삼중 스크리닝 전략의 파라미터를 최적화합니다.')
     
-    parser.add_argument('--start-date', type=str, help='시작 날짜 (YYYY-MM-DD)')
-    parser.add_argument('--end-date', type=str, help='종료 날짜 (YYYY-MM-DD)')
-    parser.add_argument('--initial-balance', type=float, default=10_000_000,
-                      help='초기 투자금액 (기본값: 10,000,000원)')
-    parser.add_argument('--position-size', type=float, default=0.2,
-                      help='포지션 크기 (0.0 ~ 1.0, 기본값: 0.2)')
-    parser.add_argument('--coin', type=str, default='KRW-BTC',
+    parser.add_argument('--market', type=str, default='KRW-BTC',
                       choices=['KRW-BTC', 'KRW-ETH', 'KRW-XRP'],
-                      help='거래할 코인 (기본값: KRW-BTC)')
-    parser.add_argument('--processes', type=int, default=None,
-                      help='사용할 CPU 코어 수 (기본값: CPU 코어 수 - 1)')
+                      help='최적화할 코인 (기본값: KRW-BTC)')
+    parser.add_argument('--months', type=int, default=12,  # years를 months로 변경
+                      help='학습에 사용할 기간(월) (기본값: 12)')
+    parser.add_argument('--population', type=int, default=50,
+                      help='유전 알고리즘 population 크기 (기본값: 50)')
+    parser.add_argument('--generations', type=int, default=30,
+                      help='유전 알고리즘 세대 수 (기본값: 30)')
+    parser.add_argument('--cpu', type=int, default=None,
+                      help='사용할 CPU 코어 수 (기본값: 사용 가능한 코어 수 - 1)')
     
     args = parser.parse_args()
     
     try:
-        # 사용 가능한 전체 날짜 범위 조회
-        db_start_date, db_end_date = get_available_date_range()
+        # 사용 가능한 데이터 기간 확인
+        db_start_date, db_end_date = get_available_date_range(args.market)
+        available_months = (db_end_date - db_start_date).days / 30  # 연 단위를 월 단위로 변경
         
-        # 입력된 날짜 파싱
-        start_date = parse_date(args.start_date)
-        end_date = parse_date(args.end_date)
-        
-        # 날짜 범위 조정
-        if start_date is None:
-            start_date = db_start_date
-        if end_date is None:
-            end_date = db_end_date
-            
-        # 날짜 범위 유효성 검사
-        if start_date > end_date:
-            raise ValueError("시작 날짜가 종료 날짜보다 늦을 수 없습니다.")
-        if start_date < db_start_date:
-            print(f"경고: 시작 날짜가 가능한 범위보다 이릅니다. {db_start_date.date()}로 조정됩니다.")
-            start_date = db_start_date
-        if end_date > db_end_date:
-            print(f"경고: 종료 날짜가 가능한 범위보다 늦습니다. {db_end_date.date()}로 조정됩니다.")
-            end_date = db_end_date
+        if args.months > available_months:
+            print(f"경고: 요청한 기간({args.months}개월)이 가용 데이터 기간({available_months:.1f}개월)보다 깁니다.")
+            print(f"가용 기간으로 조정합니다.")
+            args.months = int(available_months)
         
         # 최적화 실행
-        optimize_strategy(
-            start_date=start_date,
-            end_date=end_date,
-            market=args.coin,
-            initial_balance=args.initial_balance,
-            position_size=args.position_size,
-            n_processes=args.processes
+        best_params = optimize_parameters(
+            market=args.market,
+            train_months=args.months,  # years를 months로 변경
+            population_size=args.population,
+            generations=args.generations,
+            cpu_count=args.cpu
         )
         
-    except ValueError as e:
-        print(f"오류: {e}")
+    except Exception as e:
+        print(f"오류 발생: {e}")
         parser.print_help() 
